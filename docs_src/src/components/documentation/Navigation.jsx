@@ -233,6 +233,10 @@ export const navigation = [
         title: 'Getting Started',
       },
       {
+        href: '/documentation/en/api_reference/response-objects',
+        title: 'Response Objects',
+      },
+      {
         href: '/documentation/en/api_reference/request_object',
         title: 'The Request Object',
       },
@@ -263,6 +267,10 @@ export const navigation = [
       {
         title: 'Redirection',
         href: '/documentation/en/api_reference/redirection',
+      },
+      {
+        href: '/documentation/en/api_reference/static-files',
+        title: 'Static Files',
       },
       {
         href: '/documentation/en/api_reference/file-uploads',
@@ -448,6 +456,7 @@ const translations = {
       Templates: 'Templates',
       SubRouters: 'SubRouters',
       Installation: 'Installation',
+      'Response Objects': 'Response Objects',
       'The Request Object': 'The Request Object',
       'The Robyn Env file': 'The Robyn Env file',
       'Middlewares, Events and Websockets':
@@ -458,6 +467,7 @@ const translations = {
       CORS: 'CORS',
       Templating: 'Templating',
       Redirection: 'Redirection',
+      'Static Files': 'Static Files',
       'File Uploads': 'File Uploads',
       'Form Data': 'Form Data',
       Websockets: 'Websockets',
@@ -496,6 +506,7 @@ const translations = {
       Templates: '模板',
       SubRouters: '子路由',
       Installation: '安装',
+      'Response Objects': '响应对象',
       'The Request Object': '请求对象',
       'The Robyn Env file': 'Robyn 环境文件',
       'Middlewares, Events and Websockets': '中间件、事件和 WebSocket',
@@ -504,6 +515,7 @@ const translations = {
       CORS: '跨域资源共享',
       Templating: '模板系统',
       Redirection: '重定向',
+      'Static Files': '静态文件',
       'File Uploads': '文件上传',
       'Form Data': '表单数据',
       'Websockets': 'WebSocket',
