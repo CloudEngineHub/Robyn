@@ -1,10 +1,11 @@
 import asyncio
+import contextvars
 import json
 import os
 import pathlib
 import time
 from collections import defaultdict
-from typing import List, Optional, TypedDict
+from typing import TypedDict
 
 from integration_tests.subroutes import di_subrouter, static_router, sub_router
 from robyn import Headers, Request, Response, Robyn, SSEMessage, SSEResponse, WebSocketDisconnect, jsonify, serve_file, serve_html
@@ -267,6 +268,45 @@ def sync_before_request_401():
 @app.get("/sync/middlewares/401")
 def sync_middlewares_401():
     pass
+
+
+# --- ContextVar propagation (regression test for #1380) ---
+
+_ctxvar_middleware_value: contextvars.ContextVar = contextvars.ContextVar("ctxvar_middleware_value", default="default")
+
+
+@app.before_request("/async/contextvars/route")
+async def contextvars_before(request: Request):
+    _ctxvar_middleware_value.set("set-in-before")
+    return request
+
+
+@app.after_request("/async/contextvars/route")
+async def contextvars_after(response: Response):
+    response.headers.set("x-ctxvar-after", _ctxvar_middleware_value.get())
+    return response
+
+
+@app.get("/async/contextvars/route")
+async def contextvars_handler(request: Request):
+    return _ctxvar_middleware_value.get()
+
+
+@app.before_request("/sync/contextvars/route")
+def contextvars_before_sync(request: Request):
+    _ctxvar_middleware_value.set("set-in-sync-before")
+    return request
+
+
+@app.after_request("/sync/contextvars/route")
+def contextvars_after_sync(response: Response):
+    response.headers.set("x-ctxvar-after", _ctxvar_middleware_value.get())
+    return response
+
+
+@app.get("/sync/contextvars/route")
+def contextvars_handler_sync(request: Request):
+    return _ctxvar_middleware_value.get()
 
 
 # ===== Routes =====
@@ -1223,13 +1263,18 @@ def sample_openapi_endpoint():
 
 class Initial(Body):
     is_present: bool
-    letter: Optional[str]
+    letter: str | None
 
 
 class FullName(Body):
     first: str
     second: str
     initial: Initial
+
+
+class TestTypedBody(Body):
+    items: list[str]
+    numbers: list[int]
 
 
 class CreateItemBody(Body):
@@ -1251,6 +1296,11 @@ class CreateItemQueryParamsParams(QueryParams):
 @app.post("/openapi_request_body")
 def create_item(request, body: CreateItemBody, query: CreateItemQueryParamsParams) -> CreateItemResponse:
     return CreateItemResponse(success=True, items_changed=2)
+
+
+@app.post("/sync/body/typed")
+def sync_body_typed(body: TestTypedBody):
+    return "OK"
 
 
 # ===== JsonBody Routes =====
@@ -1451,22 +1501,22 @@ async def easy_access_async(id: int, q: str, page: int = 1):
 
 
 @app.get("/easy/sync/optional")
-def easy_access_optional_sync(name: str, age: Optional[int] = None):
+def easy_access_optional_sync(name: str, age: int | None = None):
     return {"name": name, "age": age}
 
 
 @app.get("/easy/async/optional")
-async def easy_access_optional_async(name: str, age: Optional[int] = None):
+async def easy_access_optional_async(name: str, age: int | None = None):
     return {"name": name, "age": age}
 
 
 @app.get("/easy/sync/list")
-def easy_access_list_sync(tag: List[str]):
+def easy_access_list_sync(tag: list[str]):
     return {"tags": tag}
 
 
 @app.get("/easy/async/list")
-async def easy_access_list_async(tag: List[str]):
+async def easy_access_list_async(tag: list[str]):
     return {"tags": tag}
 
 
@@ -1665,7 +1715,7 @@ def main():
     app.include_router(static_router)
 
     class BasicAuthHandler(AuthenticationHandler):
-        def authenticate(self, request: Request) -> Optional[Identity]:
+        def authenticate(self, request: Request) -> Identity | None:
             token = self.token_getter.get_token(request)
             if token is not None:
                 # Useless but we call the set_token method for testing purposes

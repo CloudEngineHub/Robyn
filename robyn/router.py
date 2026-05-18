@@ -1,9 +1,10 @@
 import inspect
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from functools import wraps
 from types import CoroutineType
-from typing import Callable, Dict, List, NamedTuple, Optional, Union, is_typeddict
+from typing import NamedTuple, is_typeddict
 
 from robyn import status_codes
 from robyn._param_utils import QueryParamValidationError, parse_route_param_names, resolve_individual_params
@@ -25,6 +26,16 @@ from robyn.types import Body, Files, FormData, IPAddress, JsonBody, Method, Path
 _logger = logging.getLogger(__name__)
 
 
+# Prebuilt Headers singletons reused across every request so the hot path
+# doesn't allocate a fresh DashMap per response. These objects are passed
+# into `Response(...)` as-is; the Rust side clones them into an independent
+# `Headers` struct during extraction, so server-side header injection never
+# mutates the singleton. Handlers that return a bare dict/list/str/bytes
+# never receive the Response and can't mutate it either.
+_JSON_HEADERS = Headers({"Content-Type": "application/json"})
+_TEXT_HEADERS = Headers({"Content-Type": "text/plain"})
+
+
 def lower_http_method(method: HttpMethod):
     return (str(method))[11:].lower()
 
@@ -36,7 +47,7 @@ class Route(NamedTuple):
     is_const: bool
     auth_required: bool
     openapi_name: str
-    openapi_tags: List[str]
+    openapi_tags: list[str]
 
 
 class RouteMiddleware(NamedTuple):
@@ -53,20 +64,23 @@ class GlobalMiddleware(NamedTuple):
 
 class BaseRouter(ABC):
     @abstractmethod
-    def add_route(*args) -> Union[Callable, CoroutineType, Dict]: ...
+    def add_route(*args) -> Callable | CoroutineType | dict: ...
 
 
 class Router(BaseRouter):
     def __init__(self) -> None:
         super().__init__()
-        self.routes: List[Route] = []
+        self.routes: list[Route] = []
 
     def _format_tuple_response(self, res: tuple) -> Response:
         if len(res) != 3:
             raise ValueError("Tuple should have 3 elements")
 
         description, headers, status_code = res
-        description = self._format_response(description).description
+        formatted = self._format_response(description)
+        if isinstance(formatted, StreamingResponse):
+            raise ValueError("StreamingResponse is not supported in tuple responses")
+        description = formatted.description
         new_headers: Headers = Headers(headers)
         if new_headers.contains("Content-Type"):
             headers.set("Content-Type", new_headers.get("Content-Type"))
@@ -79,8 +93,8 @@ class Router(BaseRouter):
 
     def _format_response(
         self,
-        res: Union[Dict, List, Response, StreamingResponse, bytes, tuple, str],
-    ) -> Union[Response, StreamingResponse]:
+        res: dict | list | Response | StreamingResponse | bytes | tuple | str,
+    ) -> Response | StreamingResponse | dict | list | str | bytes:
         if isinstance(res, Response):
             return res
 
@@ -91,16 +105,15 @@ class Router(BaseRouter):
         if pydantic_json is not None:
             return Response(
                 status_code=status_codes.HTTP_200_OK,
-                headers=Headers({"Content-Type": "application/json"}),
+                headers=_JSON_HEADERS,
                 description=pydantic_json,
             )
 
-        if isinstance(res, (dict, list)):
-            return Response(
-                status_code=status_codes.HTTP_200_OK,
-                headers=Headers({"Content-Type": "application/json"}),
-                description=jsonify(res),
-            )
+        # Bare dict/list/str/bytes are handled natively in the Rust executor:
+        # it serializes dicts/lists via orjson and wraps str/bytes directly,
+        # skipping the per-request Python-side Response/Headers construction.
+        if isinstance(res, (dict, list, str, bytes)):
+            return res
 
         if isinstance(res, FileResponse):
             response: Response = Response(
@@ -111,19 +124,12 @@ class Router(BaseRouter):
             response.file_path = res.file_path
             return response
 
-        if isinstance(res, bytes):
-            return Response(
-                status_code=status_codes.HTTP_200_OK,
-                headers=Headers({"Content-Type": "application/octet-stream"}),
-                description=res,
-            )
-
         if isinstance(res, tuple):
             return self._format_tuple_response(tuple(res))
 
         return Response(
             status_code=status_codes.HTTP_200_OK,
-            headers=Headers({"Content-Type": "text/plain"}),
+            headers=_TEXT_HEADERS,
             description=str(res).encode("utf-8"),
         )
 
@@ -135,10 +141,10 @@ class Router(BaseRouter):
         is_const: bool,
         auth_required: bool,
         openapi_name: str,
-        openapi_tags: List[str],
-        exception_handler: Optional[Callable],
+        openapi_tags: list[str],
+        exception_handler: Callable | None,
         injected_dependencies: dict,
-    ) -> Union[Callable, CoroutineType]:
+    ) -> Callable | CoroutineType:
         # Pre-compute handler signature ONCE at registration time.
         # This avoids calling inspect.signature() on every request.
         route_param_names = parse_route_param_names(endpoint)
@@ -206,20 +212,20 @@ class Router(BaseRouter):
                             except ValueError as e:
                                 return Response(
                                     status_code=status_codes.HTTP_400_BAD_REQUEST,
-                                    headers=Headers({"Content-Type": "application/json"}),
+                                    headers=_JSON_HEADERS,
                                     description=jsonify({"error": f"Invalid JSON body: {e}"}),
                                 )
                         elif issubclass(handler_param_type, Body):
-                            type_filtered_params[handler_param_name] = getattr(request, "body")
+                            type_filtered_params[handler_param_name] = request.body
                         elif issubclass(handler_param_type, QueryParams):
-                            type_filtered_params[handler_param_name] = getattr(request, "query_params")
+                            type_filtered_params[handler_param_name] = request.query_params
                         elif is_typeddict(handler_param_type):
                             try:
                                 type_filtered_params[handler_param_name] = request.json()
                             except ValueError as e:
                                 return Response(
                                     status_code=status_codes.HTTP_400_BAD_REQUEST,
-                                    headers=Headers({"Content-Type": "application/json"}),
+                                    headers=_JSON_HEADERS,
                                     description=jsonify({"error": f"Invalid JSON body: {e}"}),
                                 )
 
@@ -280,13 +286,13 @@ class Router(BaseRouter):
             except QueryParamValidationError as err:
                 response = Response(
                     status_code=status_codes.HTTP_400_BAD_REQUEST,
-                    headers=Headers({"Content-Type": "text/plain"}),
+                    headers=_TEXT_HEADERS,
                     description=str(err),
                 )
             except PydanticBodyValidationError as err:
                 response = Response(
                     status_code=status_codes.HTTP_422_UNPROCESSABLE_ENTITY,
-                    headers=Headers({"Content-Type": "application/json"}),
+                    headers=_JSON_HEADERS,
                     description=jsonify(err.error_detail),
                 )
             except Exception as err:
@@ -306,13 +312,13 @@ class Router(BaseRouter):
             except QueryParamValidationError as err:
                 response = Response(
                     status_code=status_codes.HTTP_400_BAD_REQUEST,
-                    headers=Headers({"Content-Type": "text/plain"}),
+                    headers=_TEXT_HEADERS,
                     description=str(err),
                 )
             except PydanticBodyValidationError as err:
                 response = Response(
                     status_code=status_codes.HTTP_422_UNPROCESSABLE_ENTITY,
-                    headers=Headers({"Content-Type": "application/json"}),
+                    headers=_JSON_HEADERS,
                     description=jsonify(err.error_detail),
                 )
             except Exception as err:
@@ -353,7 +359,7 @@ class Router(BaseRouter):
             self.routes.append(Route(route_type, endpoint, function, is_const, auth_required, openapi_name, openapi_tags))
             return inner_handler
 
-    def prepare_routes_openapi(self, openapi: OpenAPI, included_routers: List) -> None:
+    def prepare_routes_openapi(self, openapi: OpenAPI, included_routers: list) -> None:
         for route in self.routes:
             openapi.add_openapi_path_obj(lower_http_method(route.route_type), route.route, route.openapi_name, route.openapi_tags, route.function.handler)
 
@@ -362,16 +368,16 @@ class Router(BaseRouter):
         #    for route in router:
         #        openapi.add_openapi_path_obj(lower_http_method(route.route_type), route.route, route.openapi_name, route.openapi_tags, route.function.handler)
 
-    def get_routes(self) -> List[Route]:
+    def get_routes(self) -> list[Route]:
         return self.routes
 
 
 class MiddlewareRouter(BaseRouter):
     def __init__(self, dependencies: DependencyMap = DependencyMap()) -> None:
         super().__init__()
-        self.global_middlewares: List[GlobalMiddleware] = []
-        self.route_middlewares: List[RouteMiddleware] = []
-        self.authentication_handler: Optional[AuthenticationHandler] = None
+        self.global_middlewares: list[GlobalMiddleware] = []
+        self.route_middlewares: list[RouteMiddleware] = []
+        self.authentication_handler: AuthenticationHandler | None = None
         self.dependencies = dependencies
 
     def set_authentication_handler(self, authentication_handler: AuthenticationHandler):
@@ -437,7 +443,7 @@ class MiddlewareRouter(BaseRouter):
     # These inner functions are basically a wrapper around the closure(decorator) being returned.
     # They take a handler, convert it into a closure and return the arguments.
     # Arguments are returned as they could be modified by the middlewares.
-    def add_middleware(self, middleware_type: MiddlewareType, endpoint: Optional[str]) -> Callable[..., None]:
+    def add_middleware(self, middleware_type: MiddlewareType, endpoint: str | None) -> Callable[..., None]:
         """
         This method adds a middleware to the router.
 
@@ -509,20 +515,20 @@ class MiddlewareRouter(BaseRouter):
 
         return inner
 
-    def get_route_middlewares(self) -> List[RouteMiddleware]:
+    def get_route_middlewares(self) -> list[RouteMiddleware]:
         return self.route_middlewares
 
-    def get_global_middlewares(self) -> List[GlobalMiddleware]:
+    def get_global_middlewares(self) -> list[GlobalMiddleware]:
         return self.global_middlewares
 
 
 class WebSocketRouter(BaseRouter):
     def __init__(self) -> None:
         super().__init__()
-        self.routes: Dict[str, dict] = {}
+        self.routes: dict[str, dict] = {}
 
     def add_route(self, endpoint: str, handlers: dict) -> None:  # type: ignore
         self.routes[endpoint] = handlers
 
-    def get_routes(self) -> Dict[str, dict]:
+    def get_routes(self) -> dict[str, dict]:
         return self.routes
