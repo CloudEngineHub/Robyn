@@ -1,5 +1,6 @@
 import asyncio
 import contextvars
+import datetime
 import json
 import os
 import pathlib
@@ -794,6 +795,16 @@ async def request_json(request: Request):
     return json["key"]
 
 
+@app.post("/sync/request_json/echo")
+def sync_request_json_echo_post(request: Request):
+    return request.json()
+
+
+@app.post("/async/request_json/echo")
+async def async_request_json_echo_post(request: Request):
+    return request.json()
+
+
 # JSON type preservation test
 @app.post("/sync/request_json/types")
 def sync_json_types(request: Request):
@@ -872,6 +883,16 @@ async def async_body_put(request: Request):
     return request.body
 
 
+@app.put("/sync/request_json/echo")
+def sync_request_json_echo_put(request: Request):
+    return request.json()
+
+
+@app.put("/async/request_json/echo")
+async def async_request_json_echo_put(request: Request):
+    return request.json()
+
+
 # --- DELETE ---
 
 # dict
@@ -944,6 +965,16 @@ def sync_body_patch(request: Request):
 @app.patch("/async/body")
 async def async_body_patch(request: Request):
     return request.body
+
+
+@app.patch("/sync/request_json/echo")
+def sync_request_json_echo_patch(request: Request):
+    return request.json()
+
+
+@app.patch("/async/request_json/echo")
+async def async_request_json_echo_patch(request: Request):
+    return request.json()
 
 
 # ==== Exception Handling ====
@@ -1342,6 +1373,47 @@ async def async_json_body_typed(data: TemperatureInput):
 def openapi_json_body_endpoint(request: Request, data: TemperatureInput) -> dict:
     """Convert fahrenheit to celsius using JsonBody"""
     return {"celsius": (float(data.get("fahrenheit", 0)) - 32) * 5 / 9}
+
+
+# ===== OpenAPI per-route metadata (status_code / deprecated / include_in_schema /
+# responses / datetime return) — consolidated parity features =====
+
+
+class ErrorResponse(JSONResponse):
+    message: str
+
+
+@app.get("/openapi/datetime_return")
+def openapi_datetime_return() -> datetime.datetime:
+    """Returns a timestamp (regression for datetime return types)"""
+    return datetime.datetime.now()
+
+
+@app.post("/openapi/created", status_code=201, openapi_tags=["openapi-extras"])
+def openapi_created() -> CreateItemResponse:
+    """Create an item and respond with 201"""
+    return CreateItemResponse(success=True, items_changed=1)
+
+
+@app.get(
+    "/openapi/with_responses",
+    responses={404: "Item not found", 422: {"description": "Validation error", "model": ErrorResponse}},
+)
+def openapi_with_responses() -> dict:
+    """Documents extra 404/422 responses"""
+    return {}
+
+
+@app.get("/openapi/deprecated", deprecated=True)
+def openapi_deprecated() -> str:
+    """A deprecated endpoint"""
+    return "old"
+
+
+@app.get("/openapi/hidden", include_in_schema=False)
+def openapi_hidden() -> str:
+    """Should never appear in the openapi spec"""
+    return "hidden"
 
 
 # ===== Server-Sent Events (SSE) Routes =====

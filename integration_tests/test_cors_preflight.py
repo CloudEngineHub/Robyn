@@ -8,6 +8,7 @@ actual HTTP requests — no TestClient.
 
 import os
 import pathlib
+import platform
 import signal
 import socket
 import subprocess
@@ -23,6 +24,16 @@ REQUEST_TIMEOUT = 5
 
 ALLOWED_ORIGIN = "http://localhost:3000"
 DISALLOWED_ORIGIN = "http://evil.example.com"
+
+
+# These integration tests spawn a real Robyn server as a subprocess and manage it
+# via POSIX process groups (os.setsid / os.killpg). That harness doesn't work on
+# Windows (the child server exits before it can be reached), so the whole module is
+# skipped there. CORS behaviour is still fully covered on Linux and macOS.
+pytestmark = pytest.mark.skipif(
+    platform.system() == "Windows",
+    reason="CORS integration tests use a POSIX-only server-subprocess harness",
+)
 
 
 def _start_cors_server():
