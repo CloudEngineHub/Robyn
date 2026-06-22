@@ -4,6 +4,7 @@ import datetime
 import json
 import os
 import pathlib
+import tempfile
 import time
 from collections import defaultdict
 from typing import TypedDict
@@ -154,6 +155,18 @@ def echo_websocket_on_close(websocket):
     return ""
 
 
+# --- WebSocket binary echo endpoint (#1148) ---
+@app.websocket("/web_socket_binary")
+async def binary_websocket_endpoint(websocket):
+    try:
+        while True:
+            data = await websocket.receive_bytes()
+            # Echo the raw bytes straight back as a binary frame.
+            await websocket.send_bytes(data)
+    except WebSocketDisconnect:
+        pass
+
+
 # --- WebSocket with empty returns ---
 @app.websocket("/web_socket_empty_returns")
 async def empty_websocket_endpoint(websocket):
@@ -179,14 +192,31 @@ async def empty_websocket_on_close(websocket):
 
 # ===== Lifecycle handlers =====
 
+# Observable runtime markers so tests can assert the events actually fired
+# (#470), not merely that the handlers were registered.
+lifecycle_state = {"startup_completed": False}
+
 
 async def startup_handler():
+    lifecycle_state["startup_completed"] = True
     print("Starting up")
 
 
 @app.shutdown_handler
 def shutdown_handler():
+    # Write a marker on graceful shutdown so a test can confirm the event fired.
+    # The default integration harness stops the server with SIGKILL (which cannot
+    # be caught), so this only runs when the process is asked to stop gracefully.
+    marker = os.environ.get("ROBYN_SHUTDOWN_MARKER")
+    if marker:
+        with open(marker, "w") as marker_file:
+            marker_file.write("shut down")
     print("Shutting down")
+
+
+@app.get("/lifecycle/startup")
+def lifecycle_startup_status():
+    return {"startup_completed": lifecycle_state["startup_completed"]}
 
 
 # ===== Middlewares =====
@@ -718,6 +748,29 @@ def sync_multipart_file(request: Request):
     return {"file_names": list(file_names)}
 
 
+@app.post("/sync/multipart-file/save")
+def sync_multipart_file_save(request: Request):
+    # Persist every uploaded file to disk and report where it landed plus its
+    # size, so a test can read the saved bytes back and assert they round-trip
+    # intact (#495).
+    upload_dir = os.path.join(tempfile.gettempdir(), "robyn_upload_test")
+    os.makedirs(upload_dir, exist_ok=True)
+
+    saved = {}
+    for file_name, content in request.files.items():
+        # Never trust a client-supplied filename: strip any directory components
+        # so absolute paths or ".." segments can't escape upload_dir.
+        safe_name = os.path.basename(file_name)
+        if not safe_name or safe_name in (".", ".."):
+            continue
+        destination = os.path.join(upload_dir, safe_name)
+        with open(destination, "wb") as saved_file:
+            saved_file.write(content)
+        saved[safe_name] = {"path": destination, "size": len(content)}
+
+    return saved
+
+
 # Queries
 
 
@@ -808,6 +861,30 @@ def cookie_overwrite():
     response.set_cookie(key="session", value="first-value")
     response.set_cookie(key="session", value="final-value")  # Should overwrite
     return response
+
+
+# signed-cookie sessions (configured in main() via app.configure_sessions)
+@app.get("/sessions/get")
+def session_get(request):
+    return {"value": request.session.get("value")}
+
+
+@app.post("/sessions/set")
+def session_set(request):
+    request.session["value"] = request.json().get("value")
+    return {"stored": request.session["value"]}
+
+
+@app.get("/sessions/counter")
+async def session_counter(request):
+    request.session["count"] = request.session.get("count", 0) + 1
+    return {"count": request.session["count"]}
+
+
+@app.get("/sessions/clear")
+def session_clear(request):
+    request.session.clear()
+    return {"cleared": True}
 
 
 # --- POST ---
@@ -1913,6 +1990,10 @@ def main():
             return None
 
     app.configure_authentication(BasicAuthHandler(token_getter=BearerGetter()))
+
+    # Signed-cookie sessions, used by the /sessions/* routes and test_sessions.py.
+    # Distinct cookie name so it never collides with the /cookie/* tests.
+    app.configure_sessions(secret_key="integration-test-secret", cookie_name="robyn_session")
 
     # Read port from environment variable if set, otherwise default to 8080
     port = int(os.getenv("ROBYN_PORT", "8080"))
